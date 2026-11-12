@@ -222,21 +222,64 @@ def ensure_social_passport_blank_template():
     return str(template_path)
 
 def fill_docx(template_path, output_path, values):
+    """Заполняет плейсхолдеры, не пересоздавая абзацы и не сбрасывая оформление Word."""
     doc = Document(template_path)
-    def replace_in_p(p):
-        for key, val in values.items():
-            token = "{{" + key + "}}"
-            if token in p.text:
-                p.text = p.text.replace(token, str(val or ""))
-                for run in p.runs:
-                    run.font.name = "Times New Roman"
-    for p in doc.paragraphs:
-        replace_in_p(p)
-    for t in doc.tables:
-        for r in t.rows:
-            for c in r.cells:
-                for p in c.paragraphs:
-                    replace_in_p(p)
+
+    def replace_token_in_paragraph(paragraph, token, replacement):
+        # Токен может быть разбит Word на несколько runs. Собираем текст,
+        # находим диапазон и меняем только затронутые runs, сохраняя их стиль.
+        replacement = str(replacement or "")
+        while True:
+            runs = paragraph.runs
+            full_text = "".join(run.text for run in runs)
+            start = full_text.find(token)
+            if start < 0:
+                break
+            end = start + len(token)
+            offsets = []
+            cursor = 0
+            for run in runs:
+                offsets.append((cursor, cursor + len(run.text)))
+                cursor += len(run.text)
+
+            first_idx = next((i for i, (a, b) in enumerate(offsets) if a <= start < b), None)
+            last_idx = next((i for i, (a, b) in enumerate(offsets) if a < end <= b), None)
+            if first_idx is None or last_idx is None:
+                break
+
+            first_start = start - offsets[first_idx][0]
+            last_end = end - offsets[last_idx][0]
+            if first_idx == last_idx:
+                text = runs[first_idx].text
+                runs[first_idx].text = text[:first_start] + replacement + text[last_end:]
+            else:
+                first_text = runs[first_idx].text
+                last_text = runs[last_idx].text
+                runs[first_idx].text = first_text[:first_start] + replacement
+                for idx in range(first_idx + 1, last_idx):
+                    runs[idx].text = ""
+                runs[last_idx].text = last_text[last_end:]
+
+    def iter_paragraphs(container):
+        for paragraph in container.paragraphs:
+            yield paragraph
+        for table in container.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    yield from iter_paragraphs(cell)
+
+    for paragraph in iter_paragraphs(doc):
+        for key, value in values.items():
+            replace_token_in_paragraph(paragraph, "{{" + key + "}}", value)
+
+    # Плейсхолдеры в колонтитулах тоже заполняются без изменения форматирования.
+    for section in doc.sections:
+        for part in (section.header, section.footer, section.first_page_header,
+                     section.first_page_footer, section.even_page_header, section.even_page_footer):
+            for paragraph in iter_paragraphs(part):
+                for key, value in values.items():
+                    replace_token_in_paragraph(paragraph, "{{" + key + "}}", value)
+
     doc.save(output_path)
     return output_path
 
