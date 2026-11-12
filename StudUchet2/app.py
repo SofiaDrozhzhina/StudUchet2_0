@@ -593,6 +593,7 @@ class App(ctk.CTk):
             self.status.set(success)
             return result
         except Exception as exc:
+            raise
             messagebox.showerror("Ошибка", f"{exc}\n\nПроверьте базу данных.")
             self.status.set("Ошибка базы данных")
             return None
@@ -736,8 +737,8 @@ class App(ctk.CTk):
                 CASE WHEN s.birth_date IS NULL THEN NULL ELSE EXTRACT(YEAR FROM age(current_date,s.birth_date))::int END AS age,
                 (EXISTS(SELECT 1 FROM student_documents d WHERE d.student_id=s.id AND d.is_material_aid)
                  OR EXISTS(SELECT 1 FROM archive_documents a WHERE a.student_id=s.id
-                    AND (a.category ILIKE '%матпомощ%' OR a.category ILIKE '%мат. помощь%'
-                         OR a.title ILIKE '%материальн%помощ%'))) AS has_aid
+                    AND (a.category ILIKE '%%матпомощ%%' OR a.category ILIKE '%%мат. помощь%%'
+                         OR a.title ILIKE '%%материальн%%помощ%%'))) AS has_aid
                 FROM students s JOIN study_groups g ON g.id=s.group_id
                 LEFT JOIN specialties sp ON sp.id=g.specialty_id WHERE 1=1"""
             params = []
@@ -754,8 +755,8 @@ class App(ctk.CTk):
                 sql += """ AND (
                     EXISTS(SELECT 1 FROM student_documents d WHERE d.student_id=s.id AND d.is_material_aid)
                     OR EXISTS(SELECT 1 FROM archive_documents a WHERE a.student_id=s.id
-                        AND (a.category ILIKE '%матпомощ%' OR a.category ILIKE '%мат. помощь%'
-                             OR a.title ILIKE '%материальн%помощ%'))
+                        AND (a.category ILIKE '%%матпомощ%%' OR a.category ILIKE '%%мат. помощь%%'
+                             OR a.title ILIKE '%%материальн%%помощ%%'))
                 )"""
             sql += " ORDER BY s.last_name,s.first_name,s.middle_name"
             return db.query(sql, params, fetch=True)
@@ -977,16 +978,71 @@ class App(ctk.CTk):
             messagebox.showinfo("Импорт завершен", summary)
         except Exception as exc: messagebox.showerror("Ошибка при чтении Excel", str(exc))
 
+
     def print_student_docs(self):
-        sid = self._selected_id(self.students_tree, "студента")
-        if sid is None: return
-        docs = db.query("SELECT * FROM student_documents WHERE student_id=%s ORDER BY id", (sid,), fetch=True)
-        if not docs: messagebox.showinfo("Нет документов", "У студента нет загруженных документов."); return
-        if not messagebox.askyesno("Печать", f"Отправить на печать все {len(docs)} документа(ов)?"): return
-        for d in docs:
-            try: documents.print_file(d["file_path"])
-            except Exception as e: print(f"Ошибка печати: {e}")
-        messagebox.showinfo("Печать", "Задания отправлены в очередь печати.")
+        selected = self.students_tree.selection()
+
+        if not selected:
+            messagebox.showwarning(
+                "Выбор не сделан",
+                "Выделите одного или нескольких студентов в таблице."
+            )
+            return
+
+        student_ids = [
+            int(self.students_tree.item(item, "values")[0])
+            for item in selected
+        ]
+
+        placeholders = ",".join(["%s"] * len(student_ids))
+
+        docs = db.query(
+            f"""
+            SELECT d.*, 
+                   concat_ws(' ', s.last_name, s.first_name, s.middle_name) AS student_name
+            FROM student_documents d
+            JOIN students s ON s.id = d.student_id
+            WHERE d.student_id IN ({placeholders})
+            ORDER BY s.last_name, s.first_name, d.uploaded_at
+            """,
+            tuple(student_ids),
+            fetch=True
+        ) or []
+
+        if not docs:
+            messagebox.showinfo(
+                "Нет документов",
+                "У выбранных студентов нет загруженных документов."
+            )
+            return
+
+        if not messagebox.askyesno(
+                "Печать",
+                f"Выбрано студентов: {len(student_ids)}\n"
+                f"Найдено документов: {len(docs)}\n\n"
+                "Отправить все документы на печать?"
+        ):
+            return
+
+        printed = 0
+        errors = []
+
+        for doc in docs:
+            try:
+                documents.print_file(doc["file_path"])
+                printed += 1
+            except Exception as exc:
+                errors.append(
+                    f'{doc["student_name"]} — {doc["file_name"]}: {exc}'
+                )
+
+        result = f"Отправлено на печать документов: {printed} из {len(docs)}."
+
+        if errors:
+            result += "\n\nОшибки:\n" + "\n".join(errors[:10])
+
+        messagebox.showinfo("Результат печати", result)
+
 
     def generate_bulk_documents(self):
         """Формирует выбранный шаблон для всех выделенных студентов и сохраняет файлы в архиве."""
@@ -1275,4 +1331,6 @@ if __name__ == "__main__":
         app = App()
         app.mainloop()
     except Exception as exc:
+        import traceback
+        traceback.print_exc()
         messagebox.showerror("Ошибка запуска", f"{exc}\n\nПроверьте настройки PostgreSQL в db.py.")
