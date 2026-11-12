@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+storage/documents/*
+storage/templates/*
+storage/archive/*
+!storage/documents/.gitkeep
+!storage/templates/.gitkeep
+!storage/archive/.gitkeep
