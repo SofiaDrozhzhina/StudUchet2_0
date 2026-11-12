@@ -232,6 +232,7 @@ class App(ctk.CTk):
             ("Профиль студента", self.student_profile, COLOR_PRIMARY, COLOR_PRIMARY_HOVER),
             ("Редактировать", self.edit_student, COLOR_WARNING, COLOR_WARNING_HOVER),
             ("Печать всех документов", self.print_student_docs, COLOR_NEUTRAL, COLOR_NEUTRAL_HOVER),
+            ("Сформировать для выбранных", self.generate_bulk_documents, COLOR_PRIMARY, COLOR_PRIMARY_HOVER),
             ("Удалить", self.delete_student, COLOR_DANGER, COLOR_DANGER_HOVER),
         ]
         for text, cmd, bg, hbg in buttons:
@@ -529,9 +530,13 @@ class App(ctk.CTk):
                 vals = documents.student_values(s, g, reason=chosen_reason, aid_fio_gen=final_fio_gen, student_word=final_word)
                 documents.fill_docx(template["file_path"], out, vals)
                 stored = documents.copy_into(out, documents.ARCHIVE)
+                title = f"Заявление на мат. помощь ({s['last_name']})"
                 db.query("""INSERT INTO archive_documents(group_id,student_id,title,file_name,file_path,category)
-                    VALUES(%s,%s,%s,%s,%s,%s)""", (g["id"], s["id"], f"Заявление на мат. помощь ({s['last_name']})", Path(stored).name, stored, "Заявления на матпомощь"))
-                self.refresh_archive()
+                    VALUES(%s,%s,%s,%s,%s,%s)""", (g["id"], s["id"], title, Path(stored).name, stored, "Заявления на матпомощь"))
+                db.query("""INSERT INTO student_documents(student_id,title,file_name,file_path,file_type,is_material_aid)
+                    VALUES(%s,%s,%s,%s,%s,TRUE)""",
+                    (s["id"], title, Path(stored).name, stored, Path(stored).suffix.lower().lstrip(".")))
+                self.refresh_all()
                 if messagebox.askyesno("Готово", "Заявление сформировано и сохранено в архив!\nОткрыть готовый Word?"):
                     documents.open_file(out)
             except Exception as e: messagebox.showerror("Ошибка", str(e))
@@ -729,7 +734,10 @@ class App(ctk.CTk):
         def load():
             sql = """SELECT s.*,g.name AS group_name,g.course,sp.name AS specialty_name,
                 CASE WHEN s.birth_date IS NULL THEN NULL ELSE EXTRACT(YEAR FROM age(current_date,s.birth_date))::int END AS age,
-                EXISTS(SELECT 1 FROM student_documents d WHERE d.student_id=s.id AND d.is_material_aid) AS has_aid
+                (EXISTS(SELECT 1 FROM student_documents d WHERE d.student_id=s.id AND d.is_material_aid)
+                 OR EXISTS(SELECT 1 FROM archive_documents a WHERE a.student_id=s.id
+                    AND (a.category ILIKE '%матпомощ%' OR a.category ILIKE '%мат. помощь%'
+                         OR a.title ILIKE '%материальн%помощ%'))) AS has_aid
                 FROM students s JOIN study_groups g ON g.id=s.group_id
                 LEFT JOIN specialties sp ON sp.id=g.specialty_id WHERE 1=1"""
             params = []
@@ -742,7 +750,13 @@ class App(ctk.CTk):
             af = self.age_filter.get() if hasattr(self, "age_filter") else "Все"
             if af.startswith("Совершеннолетние"): sql += " AND s.birth_date IS NOT NULL AND age(current_date,s.birth_date) >= interval '18 years'"
             elif af.startswith("Несовершеннолетние"): sql += " AND s.birth_date IS NOT NULL AND age(current_date,s.birth_date) < interval '18 years'"
-            if hasattr(self, "aid_filter") and self.aid_filter.get(): sql += " AND EXISTS(SELECT 1 FROM student_documents d WHERE d.student_id=s.id AND d.is_material_aid)"
+            if hasattr(self, "aid_filter") and self.aid_filter.get():
+                sql += """ AND (
+                    EXISTS(SELECT 1 FROM student_documents d WHERE d.student_id=s.id AND d.is_material_aid)
+                    OR EXISTS(SELECT 1 FROM archive_documents a WHERE a.student_id=s.id
+                        AND (a.category ILIKE '%матпомощ%' OR a.category ILIKE '%мат. помощь%'
+                             OR a.title ILIKE '%материальн%помощ%'))
+                )"""
             sql += " ORDER BY s.last_name,s.first_name,s.middle_name"
             return db.query(sql, params, fetch=True)
 
@@ -973,6 +987,113 @@ class App(ctk.CTk):
             try: documents.print_file(d["file_path"])
             except Exception as e: print(f"Ошибка печати: {e}")
         messagebox.showinfo("Печать", "Задания отправлены в очередь печати.")
+
+    def generate_bulk_documents(self):
+        """Формирует выбранный шаблон для всех выделенных студентов и сохраняет файлы в архиве."""
+        selected = self.students_tree.selection()
+        if not selected:
+            messagebox.showwarning("Выбор не сделан", "Выделите одного или нескольких студентов в таблице.")
+            return
+
+        student_ids = [int(self.students_tree.item(item, "values")[0]) for item in selected]
+        templates = db.query("SELECT * FROM document_templates ORDER BY name", fetch=True) or []
+        if not templates:
+            messagebox.showinfo("Нет шаблонов", "Сначала добавьте шаблон во вкладке «Шаблоны».")
+            return
+
+        win = ctk.CTkToplevel(self)
+        win.title("Массовое формирование документов")
+        win.geometry("560x330")
+        win.transient(self)
+        win.grab_set()
+
+        ctk.CTkLabel(win, text=f"Выбрано студентов: {len(student_ids)}", font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=20, pady=(18, 6))
+        ctk.CTkLabel(win, text="Шаблон:").pack(anchor="w", padx=20)
+        template_map = {f'{t["name"]} ({t["file_type"].upper()})': t for t in templates}
+        template_combo = ctk.CTkComboBox(win, values=list(template_map), width=510)
+        template_combo.pack(padx=20, pady=(3, 10))
+        template_combo.set(next(iter(template_map)))
+
+        ctk.CTkLabel(win, text="Причина материальной помощи (для соответствующего шаблона):").pack(anchor="w", padx=20)
+        reason_combo = ctk.CTkComboBox(win, values=documents.AID_REASONS, width=510)
+        reason_combo.pack(padx=20, pady=(3, 10))
+        reason_combo.set(documents.AID_REASONS[0])
+
+        print_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(win, text="Отправить сформированные документы на печать", variable=print_var).pack(anchor="w", padx=20, pady=8)
+
+        def generate():
+            template = template_map.get(template_combo.get())
+            if not template:
+                messagebox.showwarning("Шаблон", "Выберите шаблон из списка.")
+                return
+            is_aid = "материальн" in template["name"].lower()
+            reason = reason_combo.get().strip()
+            if is_aid and not reason:
+                messagebox.showwarning("Причина", "Выберите причину материальной помощи.")
+                return
+
+            placeholders = ",".join(["%s"] * len(student_ids))
+            students = db.query(f"""SELECT s.*, g.name AS group_name, g.course, sp.name AS specialty_name
+                FROM students s JOIN study_groups g ON g.id=s.group_id
+                LEFT JOIN specialties sp ON sp.id=g.specialty_id
+                WHERE s.id IN ({placeholders})
+                ORDER BY s.last_name,s.first_name,s.middle_name""", tuple(student_ids), fetch=True) or []
+            if not students:
+                messagebox.showinfo("Нет студентов", "Выбранные студенты не найдены.")
+                return
+
+            win.destroy()
+            created, errors, print_paths = 0, [], []
+            for student in students:
+                group = {"id": student["group_id"], "name": student["group_name"],
+                         "course": student["course"], "specialty_name": student["specialty_name"]}
+                fio = documents.safe_name(" ".join(filter(None, [student["last_name"], student["first_name"], student.get("middle_name", "")])))
+                try:
+                    values = documents.student_values(student, group, reason=reason if is_aid else "")
+                    if is_aid:
+                        genitive, student_word = documents.inflect_fio_genitive(
+                            student["last_name"], student["first_name"], student.get("middle_name", ""))
+                        values = documents.student_values(student, group, reason=reason,
+                                                           aid_fio_gen=genitive, student_word=student_word)
+
+                    filename = f"{student['id']}_{fio}_{documents.safe_name(template['name'])}.{template['file_type']}"
+                    output = documents.ARCHIVE / filename
+                    if template["file_type"] == "docx":
+                        documents.fill_docx(template["file_path"], output, values)
+                    else:
+                        documents.fill_xlsx(template["file_path"], output, values)
+
+                    stored = str(output.resolve())
+                    title = f"{template['name']} — {student['last_name']} {student['first_name']}"
+                    category = "Заявления на матпомощь" if is_aid else "Сформированные документы"
+                    db.query("""INSERT INTO archive_documents(group_id,student_id,title,file_name,file_path,category)
+                        VALUES(%s,%s,%s,%s,%s,%s)""",
+                        (student["group_id"], student["id"], title, Path(stored).name, stored, category))
+                    db.query("""INSERT INTO student_documents(student_id,title,file_name,file_path,file_type,is_material_aid)
+                        VALUES(%s,%s,%s,%s,%s,%s)""",
+                        (student["id"], title, Path(stored).name, stored,
+                         template["file_type"], is_aid))
+                    created += 1
+                    print_paths.append(stored)
+                except Exception as exc:
+                    errors.append(f"{fio}: {exc}")
+
+            self.refresh_all()
+            if print_var.get() and print_paths:
+                for path in print_paths:
+                    try:
+                        documents.print_file(path)
+                    except Exception as exc:
+                        errors.append(f"Печать {Path(path).name}: {exc}")
+
+            summary = f"Сформировано документов: {created} из {len(students)}."
+            if errors:
+                summary += "\n\nОшибки:\n" + "\n".join(errors[:10])
+            messagebox.showinfo("Массовое формирование завершено", summary)
+
+        ctk.CTkButton(win, text="Сформировать документы", command=generate,
+                      fg_color=COLOR_SUCCESS, hover_color=COLOR_SUCCESS_HOVER, width=220).pack(pady=16)
 
     def refresh_docs(self):
         term = self.doc_search_var.get().strip() if hasattr(self, "doc_search_var") else ""
