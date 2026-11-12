@@ -508,13 +508,13 @@ class App(ctk.CTk):
         reason_combo.pack(padx=20, pady=2)
         reason_combo.set("проживаю в неполной семье")
 
-        custom_reason = ctk.CTkEntry(win, width=490, placeholder_text="Или введите свою причину вручную...")
-        custom_reason.pack(padx=20, pady=4)
-
         def proceed():
             s = st_map[st_combo.get()]
             g = {"id": s["group_id"], "name": s["group_name"], "course": s["course"], "specialty_name": s["specialty_name"]}
-            chosen_reason = custom_reason.get().strip() or reason_combo.get()
+            chosen_reason = reason_combo.get().strip()
+            if chosen_reason not in documents.AID_REASONS:
+                messagebox.showwarning("Причина", "Выберите причину из готового списка.")
+                return
             final_fio_gen = fio_entry.get().strip()
             final_word = word_combo.get()
             win.destroy()
@@ -1148,6 +1148,7 @@ class App(ctk.CTk):
         if not d: return
         if not messagebox.askyesno("Удаление", "Удалить выбранный документ студента?"): return
         db.query("DELETE FROM student_documents WHERE id=%s", (d["id"],))
+        db.query("DELETE FROM archive_documents WHERE file_path=%s", (d["file_path"],))
         try: Path(d["file_path"]).unlink(missing_ok=True)
         except OSError: pass
         self.refresh_all()
@@ -1252,6 +1253,7 @@ class App(ctk.CTk):
         a = self._archive_record()
         if not a: return
         if not messagebox.askyesno("Удаление", f"Удалить «{a['title']}» из архива?"): return
+        db.query("DELETE FROM student_documents WHERE file_path=%s", (a["file_path"],))
         db.query("DELETE FROM archive_documents WHERE id=%s", (a["id"],))
         try: Path(a["file_path"]).unlink(missing_ok=True)
         except OSError: pass
